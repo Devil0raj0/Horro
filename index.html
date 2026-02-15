@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>The Whispering Fog - Prototype</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; font-family: 'Courier New', Courier, monospace; }
+        #ui-layer {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none; display: flex; flex-direction: column; justify-content: space-between;
+        }
+        #hud-top { padding: 20px; color: #ff3333; text-shadow: 0 0 5px #ff0000; font-size: 20px; }
+        #center-crosshair {
+            position: absolute; top: 50%; left: 50%; width: 10px; height: 10px;
+            border: 2px solid rgba(255, 255, 255, 0.5); border-radius: 50%;
+            transform: translate(-50%, -50%);
+        }
+        #instruction-screen {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0, 0, 0, 0.9); display: flex; align-items: center; justify-content: center;
+            color: white; flex-direction: column; text-align: center; pointer-events: auto; cursor: pointer;
+        }
+        h1 { font-size: 50px; color: #bd0000; letter-spacing: 5px; text-transform: uppercase; }
+        p { font-size: 18px; color: #ccc; }
+        .key { color: #fff; font-weight: bold; border: 1px solid #555; padding: 2px 6px; border-radius: 4px; }
+        #stamina-bar-container {
+            width: 300px; height: 10px; background: #333; margin: 20px auto; border: 1px solid #555;
+        }
+        #stamina-bar { width: 100%; height: 100%; background: #fff; transition: width 0.1s; }
+        #damage-overlay {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: radial-gradient(circle, transparent 50%, red 150%);
+            opacity: 0; transition: opacity 0.2s; pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="damage-overlay"></div>
+    <div id="ui-layer">
+        <div id="hud-top">
+            STATUS: <span id="status-text">ALIVE</span><br>
+            OBJECTIVE: FIND THE BLUE ORB
+        </div>
+        <div id="center-crosshair"></div>
+        <div id="stamina-bar-container"><div id="stamina-bar"></div></div>
+    </div>
+
+    <div id="instruction-screen">
+        <h1>The Whispering Fog</h1>
+        <p>Click to Start</p>
+        <p>Use <span class="key">W</span> <span class="key">A</span> <span class="key">S</span> <span class="key">D</span> to Move</p>
+        <p>Use <span class="key">SHIFT</span> to Run</p>
+        <p>Mouse to Look</p>
+        <p style="color: #ff4444; margin-top: 20px;">Don't let it touch you.</p>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/PointerLockControls.js"></script>
+
+    <script>
+        // --- GAME VARIABLES ---
+        let camera, scene, renderer, controls;
+        let moveForward = false, moveBackward = false, moveLeft = false, moveRight = false, canJump = false;
+        let prevTime = performance.now();
+        let velocity = new THREE.Vector3();
+        let direction = new THREE.Vector3();
+        let flashlight;
+        
+        // Gameplay
+        let isRunning = false;
+        let stamina = 100;
+        let playerHealth = 100;
+        let gameActive = false;
+        
+        // Entities
+        const enemy = { mesh: null, speed: 8, active: true };
+        const objective = { mesh: null, found: false };
+        const trees = [];
+
+        // Setup
+        init();
+        animate();
+
+        function init() {
+            // 1. Scene & Fog (The Horror Element)
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x050505);
+            // Dense black fog starting close to player
+            scene.fog = new THREE.FogExp2(0x000000, 0.035); 
+
+            // 2. Camera & Rendering
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true; // Enable shadows
+            document.body.appendChild(renderer.domElement);
+
+            // 3. Controls (First Person)
+            controls = new THREE.PointerLockControls(camera, document.body);
+            const instructions = document.getElementById('instruction-screen');
+            
+            instructions.addEventListener('click', function () {
+                controls.lock();
+            });
+
+            controls.addEventListener('lock', function () {
+                instructions.style.display = 'none';
+                gameActive = true;
+            });
+
+            controls.addEventListener('unlock', function () {
+                instructions.style.display = 'flex';
+                gameActive = false;
+                document.querySelector('#instruction-screen p').innerHTML = "Click to Resume";
+            });
+
+            scene.add(controls.getObject());
+
+            // 4. Input Listeners
+            const onKeyDown = function (event) {
+                switch (event.code) {
+                    case 'ArrowUp': case 'KeyW': moveForward = true; break;
+                    case 'ArrowLeft': case 'KeyA': moveLeft = true; break;
+                    case 'ArrowDown': case 'KeyS': moveBackward = true; break;
+                    case 'ArrowRight': case 'KeyD': moveRight = true; break;
+                    case 'ShiftLeft': isRunning = true; break;
+                }
+            };
+            const onKeyUp = function (event) {
+                switch (event.code) {
+                    case 'ArrowUp': case 'KeyW': moveForward = false; break;
+                    case 'ArrowLeft': case 'KeyA': moveLeft = false; break;
+                    case 'ArrowDown': case 'KeyS': moveBackward = false; break;
+                    case 'ArrowRight': case 'KeyD': moveRight = false; break;
+                    case 'ShiftLeft': isRunning = false; break;
+                }
+            };
+            document.addEventListener('keydown', onKeyDown);
+            document.addEventListener('keyup', onKeyUp);
+
+            // 5. World Generation
+            // Floor
+            const floorGeometry = new THREE.PlaneGeometry(2000, 2000, 100, 100);
+            floorGeometry.rotateX(-Math.PI / 2);
+            const floorMaterial = new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.8 });
+            const floor = new THREE.Mesh(floorGeometry, floorMaterial);
+            scene.add(floor);
+
+            // Trees (Random boxes for open world feel)
+            const boxGeo = new THREE.BoxGeometry(2, 20, 2);
+            const boxMat = new THREE.MeshStandardMaterial({ color: 0x0f0f0f });
+            
+            for (let i = 0; i < 400; i++) {
+                const tree = new THREE.Mesh(boxGeo, boxMat);
+                tree.position.x = Math.random() * 800 - 400;
+                tree.position.y = 10;
+                tree.position.z = Math.random() * 800 - 400;
+                // Don't spawn trees on player
+                if (Math.abs(tree.position.x) < 10 && Math.abs(tree.position.z) < 10) continue;
+                scene.add(tree);
+                trees.push(tree);
+            }
+
+            // 6. Lighting (Flashlight)
+            const ambientLight = new THREE.AmbientLight(0x404040, 0.2); // Very dim ambient
+            scene.add(ambientLight);
+
+            flashlight = new THREE.SpotLight(0xffffff, 1);
+            flashlight.position.set(0, 0, 0);
+            flashlight.angle = Math.PI / 6;
+            flashlight.penumbra = 0.2;
+            flashlight.decay = 2;
+            flashlight.distance = 50;
+            flashlight.castShadow = true;
+            
+            // Attach flashlight to camera (head)
+            camera.add(flashlight);
+            flashlight.target.position.set(0, 0, -1);
+            camera.add(flashlight.target);
+
+            // 7. Enemy (The Stalker)
+            const enemyGeo = new THREE.DodecahedronGeometry(1.5);
+            const enemyMat = new THREE.MeshStandardMaterial({ 
+                color: 0xff0000, 
+                emissive: 0x550000,
+                roughness: 0.1,
+                metalness: 0.5
+            });
+            enemy.mesh = new THREE.Mesh(enemyGeo, enemyMat);
+            // Spawn enemy far away
+            enemy.mesh.position.set(30, 2, -30);
+            scene.add(enemy.mesh);
+
+            // Enemy Light (Red glow)
+            const enemyLight = new THREE.PointLight(0xff0000, 1, 15);
+            enemy.mesh.add(enemyLight);
+
+            // 8. The Objective
+            const objGeo = new THREE.SphereGeometry(1, 16, 16);
+            const objMat = new THREE.MeshStandardMaterial({ color: 0x00ffff, emissive: 0x00aaff });
+            objective.mesh = new THREE.Mesh(objGeo, objMat);
+            objective.mesh.position.set(Math.random() * 100 - 50, 1, Math.random() * 100 - 50);
+            // Ensure it's not too close
+            if(objective.mesh.position.x < 10) objective.mesh.position.x += 20;
+            
+            const objLight = new THREE.PointLight(0x00ffff, 1, 10);
+            objective.mesh.add(objLight);
+            scene.add(objective.mesh);
+
+            window.addEventListener('resize', onWindowResize);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (gameActive) {
+                const time = performance.now();
+                const delta = (time - prevTime) / 1000;
+
+                // --- Player Movement Physics ---
+                velocity.x -= velocity.x * 10.0 * delta;
+                velocity.z -= velocity.z * 10.0 * delta;
+
+                direction.z = Number(moveForward) - Number(moveBackward);
+                direction.x = Number(moveRight) - Number(moveLeft);
+                direction.normalize();
+
+                // Sprint Logic
+                let speed = 40.0;
+                if (isRunning && stamina > 0) {
+                    speed = 80.0;
+                    stamina -= 0.5;
+                } else {
+                    if (stamina < 100) stamina += 0.2;
+                }
+                document.getElementById('stamina-bar').style.width = stamina + '%';
+
+                if (moveForward || moveBackward) velocity.z -= direction.z * speed * delta;
+                if (moveLeft || moveRight) velocity.x -= direction.x * speed * delta;
+
+                controls.moveRight(-velocity.x * delta);
+                controls.moveForward(-velocity.z * delta);
+
+                // --- Enemy AI (Simple Follow) ---
+                if (enemy.active) {
+                    const playerPos = camera.position;
+                    const enemyPos = enemy.mesh.position;
+                    
+                    // Vector towards player
+                    const dx = playerPos.x - enemyPos.x;
+                    const dz = playerPos.z - enemyPos.z;
+                    const distance = Math.sqrt(dx*dx + dz*dz);
+
+                    // Move enemy
+                    const moveSpeed = enemy.speed * delta;
+                    enemy.mesh.position.x += (dx / distance) * moveSpeed;
+                    enemy.mesh.position.z += (dz / distance) * moveSpeed;
+                    enemy.mesh.position.y = 2 + Math.sin(time * 0.005); // Float effect
+                    enemy.mesh.lookAt(playerPos);
+
+                    // Damage Check
+                    if (distance < 3) {
+                        playerHealth -= 1;
+                        document.getElementById('damage-overlay').style.opacity = 0.8;
+                        if (playerHealth <= 0) {
+                            document.getElementById('status-text').innerText = "DEAD";
+                            document.getElementById('status-text').style.color = "red";
+                            controls.unlock();
+                            alert("GAME OVER - The Fog Consumed You");
+                            location.reload();
+                        }
+                    } else {
+                        document.getElementById('damage-overlay').style.opacity = 0;
+                    }
+
+                    // Flicker Flashlight if enemy is close
+                    if (distance < 15) {
+                        flashlight.intensity = Math.random() > 0.5 ? 0.1 : 1;
+                    } else {
+                        flashlight.intensity = 1;
+                    }
+                }
+
+                // --- Objective Check ---
+                const distToObj = camera.position.distanceTo(objective.mesh.position);
+                if (distToObj < 3) {
+                    document.getElementById('status-text').innerText = "ESCAPED";
+                    document.getElementById('status-text').style.color = "#00ff00";
+                    controls.unlock();
+                    alert("YOU ESCAPED!");
+                    location.reload();
+                }
+
+                prevTime = time;
+            }
+            
+            renderer.render(scene, camera);
+        }
+    </script>
+</body>
+</html>
